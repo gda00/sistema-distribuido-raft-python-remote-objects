@@ -1,12 +1,13 @@
 import subprocess
+import sys
 import time
 import config
 
 def start_nameserver():
-    return subprocess.Popen(["python","-m","Pyro5.nameserver"])
+    return subprocess.Popen([sys.executable,"-m","Pyro5.nameserver"])
 
 def start_node(node_id):
-    return subprocess.Popen(["python","raft_node.py",str(node_id)])
+    return subprocess.Popen([sys.executable,"raft_node.py",str(node_id)])
 
 def main():
     ns_process = start_nameserver()
@@ -19,7 +20,11 @@ def main():
         
     try:
         while True:
-            time.sleep(1)
+            cmd = input("Digite 'kill ID' para derrubar um nó: ")
+            if cmd.startswith("kill"):
+                _, n_id = cmd.split()
+                node_processes[int(n_id)].terminate()
+                print(f"Nó {n_id} finalizado.")
     except KeyboardInterrupt:
         for proc in node_processes:
             proc.terminate()
