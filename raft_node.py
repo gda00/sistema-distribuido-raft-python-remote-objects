@@ -1,3 +1,6 @@
+from raft_log import RaftLog
+from replication import Replication
+
 import sys
 
 import Pyro5.api
@@ -7,7 +10,7 @@ import threading
 import time
 import random
 
-class RaftNode:
+class RaftNode(Replication):
     def __init__(self, node_id):
         self.node_id = node_id
         self.uri = config.NODES[node_id]
@@ -16,6 +19,12 @@ class RaftNode:
         self.current_term = 0
         self.voted_for = None
         self.role = 'follower'
+
+        self.log = RaftLog()
+        self.commit_index = 0
+        self.last_applied = 0
+        self.next_index = {}
+        self.match_index = {}
 
         self.votes_received = 0
         self.leader_uri = None
@@ -50,7 +59,10 @@ class RaftNode:
             with Pyro5.api.Proxy(uri) as proxy:
                 proxy._pyroTimeout = 0.1
                 term, granted = proxy.request_vote(
-                    self.current_term, self.node_id, 0, 0
+                    self.current_term, 
+                    self.node_id, 
+                    self.log.get_last_index(), 
+                    self.log.get_last_term()
                 )
 
                 if term > self.current_term:
@@ -68,12 +80,19 @@ class RaftNode:
         if term < self.current_term:
             return self.current_term, False
 
+        last_term = self.log.get_last_term()
+        last_index = self.log.get_last_index()
+
+        log_ok = (last_log_term > last_term) or \
+                    (last_log_term == last_term and last_log_index >= last_index)
+        
+
         if term > self.current_term:
             self.current_term = term
             self.role = 'follower'
             self.voted_for = None
 
-        if self.voted_for is None or self.voted_for == candidate_id:
+        if (self.voted_for is None or self.voted_for == candidate_id) and log_ok:
             self.voted_for = candidate_id
             self._reset_election_timer()
             return self.current_term, True
@@ -89,6 +108,9 @@ class RaftNode:
     def _become_leader(self):
         self.role = 'leader'
 
+        self.next_index = {p: self.log.get_last_index() + 1 for p in config.NODES if p != self.node_id}
+        self.match_index = {p: 0 for p in config.NODES if p != self.node_id}
+
         print(f"\n[NÓ {self.node_id}] LÍDER NO TERMO {self.current_term}")
 
         try:
@@ -99,42 +121,11 @@ class RaftNode:
 
         threading.Thread(target=self._send_heartbeats, daemon=True).start()
 
+    
     def _send_heartbeats(self):
         while self.role == 'leader':
-            for peer_id, uri in config.NODES.items():
-                if peer_id != self.node_id:
-                    threading.Thread(target=self._send_append_entries, args=(uri,)).start()
-
+            self._replicate_to_followers()
             time.sleep(config.HEARTBEAT_INTERVAL)
-
-    def _send_append_entries(self, uri):
-        try:
-            with Pyro5.api.Proxy(uri) as proxy:
-                proxy._pyroTimeout = 0.1
-                term, success = proxy.append_entries(
-                    self.current_term, self.node_id, 0, 0, [], 0
-                )
-
-                if term > self.current_term:
-                    self.current_term = term
-                    self.role = 'follower'
-                    self.voted_for = None
-                    self._reset_election_timer()
-        except Exception:
-            pass
-
-    @expose
-    def append_entries(self, term, leader_id, prev_log_index, prev_log_term, entries, leader_commit):
-        if term < self.current_term:
-            return self.current_term, False
-
-        if term >= self.current_term:
-            self.current_term = term
-            self.role = 'follower'
-            self.voted_for = None
-            self._reset_election_timer()
-
-        return self.current_term, True
 
     def _reset_election_timer(self):
         timeout = random.uniform(config.ELECTION_TIMEOUT_MIN, config.ELECTION_TIMEOUT_MAX)
@@ -150,8 +141,9 @@ class RaftNode:
 
     def _apply_to_state_machine(self, entry):
         self.state_machine.append(entry)
-        for i in self.state_machine:
-            print(i)
+        #for i in self.state_machine:
+        #    print(i)
+        print(entry)
 
 def main():
     node_id = int(sys.argv[1])

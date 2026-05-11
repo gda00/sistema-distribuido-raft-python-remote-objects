@@ -3,12 +3,12 @@ import time
 
 class RaftCliente:
     def __init__(self):
-        self.leader_uri = None
+        self.leader = None
     
     def _find_leader(self):
         try:
             ns = Pyro5.api.locate_ns()
-            uri = ns.lookup("Lider")
+            uri = ns.lookup("Leader")
             self.leader = Pyro5.api.Proxy(uri)
             print (f"[CLIENTE] Líder encontrado na URI: {uri}")
             return True
@@ -47,6 +47,6 @@ class RaftCliente:
                     time.sleep(2)
                     sucesso = self.send_command(command)
                 
-    if __name__ == "__main__":
-        cliente = RaftCliente()
-        cliente.run()
+if __name__ == "__main__":
+    cliente = RaftCliente()
+    cliente.run()

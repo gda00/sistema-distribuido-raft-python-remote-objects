@@ -25,6 +25,7 @@ def main():
                 _, n_id = cmd.split()
                 node_processes[int(n_id)].terminate()
                 print(f"Nó {n_id} finalizado.")
+                    
     except KeyboardInterrupt:
         for proc in node_processes:
             proc.terminate()
