@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package raft;
+
+// Entrada individual do log replicado
+message LogEntry {
+    int32 index = 1;
+    int32 term = 2;
+    string command = 3;
+}
+
+// Mensagens de eleição (RequestVote RPC)
+message RequestVoteRequest {
+    int32 term = 1;
+    int32 candidate_id = 2;
+    int32 last_log_index = 3;
+    int32 last_log_term = 4;
+}
+
+message RequestVoteReply {
+    int32 term = 1;
+    bool vote_granted = 2;
+}
+
+// Mensagens de replicação de log e heartbeat (AppendEntries RPC)
+message AppendEntriesRequest {
+    int32 term = 1;
+    int32 leader_id = 2;
+    int32 prev_log_index = 3;
+    int32 prev_log_term = 4;
+    repeated LogEntry entries = 5;
+    int32 leader_commit = 6;
+}
+
+message AppendEntriesReply {
+    int32 term = 1;
+    bool success = 2;
+}
+
+// Mensagens do cliente para enviar comandos ao líder
+message CommandRequest {
+    string command = 1;
+}
+
+message CommandReply {
+    bool success = 1;
+    string leader_hint = 2;  // endereço do líder caso este nó não seja o líder
+}
+
+// Serviço Raft exposto por cada nó
+service RaftService {
+    rpc RequestVote    (RequestVoteRequest)    returns (RequestVoteReply);
+    rpc AppendEntries  (AppendEntriesRequest)  returns (AppendEntriesReply);
+    rpc ReceiveCommand (CommandRequest)        returns (CommandReply);
+}

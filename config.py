@@ -1,13 +1,16 @@
+# Mapeamento de ID do nó para endereço gRPC (host:porta)
+# Cada nó escuta em uma porta diferente no localhost
 NODES = {
-    0: "PYRO:peerA@localhost:6767",
-    1: "PYRO:peerB@localhost:6768",
-    2: "PYRO:peerC@localhost:6769",
-    3: "PYRO:peerD@localhost:6770"
+    0: "localhost:50050",
+    1: "localhost:50051",
+    2: "localhost:50052",
+    3: "localhost:50053",
 }
 
-LEADER_NAME = "Leader"
+# Intervalo entre heartbeats enviados pelo líder (em segundos)
+HEARTBEAT_INTERVAL = 0.5  # meio segundo
 
-HEARTBEAT_INTERVAL = 0.5 # meio segundo
-
-ELECTION_TIMEOUT_MIN = 1.5 # 1.5 segundos
-ELECTION_TIMEOUT_MAX = 3.0 # 3 segundos
+# Intervalo aleatório de timeout de eleição (em segundos)
+# Se um seguidor não receber heartbeat nesse prazo, inicia eleição
+ELECTION_TIMEOUT_MIN = 1.5
+ELECTION_TIMEOUT_MAX = 3.0
