@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package raft;
 
+option go_package = "github.com/breba/raft-client/raft";
+
 // Entrada individual do log replicado
 message LogEntry {
     int32 index = 1;
@@ -44,20 +46,19 @@ message CommandRequest {
 
 message CommandReply {
     bool success = 1;
-    string leader_hint = 2;  // endereço do líder caso este nó não seja o líder
+    string leader_hint = 2;
 }
 
 // Mensagens de leitura de dados committed
 message ReadRequest {
-    // Filtro opcional: se vazio, retorna todas as entradas committed
     string key = 1;
 }
 
 message ReadReply {
     bool success = 1;
-    repeated string entries = 2;   // entradas committed (command de cada LogEntry)
-    int32 commit_index = 3;        // commit_index atual do nó respondente
-    string leader_hint = 4;        // endereço do líder (para leitura forte, se desejado)
+    repeated string entries = 2;
+    int32 commit_index = 3;
+    string leader_hint = 4;
 }
 
 // Serviço Raft exposto por cada nó

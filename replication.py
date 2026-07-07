@@ -48,12 +48,18 @@ class Replication:
             return raft_pb2.AppendEntriesReply(term=self.current_term, success=False)
 
         # Regra 2: Mensagem válida de um líder — atualiza estado e reinicia timer
+        term_changed = term > self.current_term
         if term >= self.current_term:
             self.current_term = term
             self.role = 'follower'
             self.voted_for = None
             self.leader_id = leader_id   # registra o líder atual (para redirecionar clientes)
             self._reset_election_timer()
+
+        # Persiste imediatamente se o termo mudou (§5.1 do paper do Raft):
+        # current_term deve ser durável antes de qualquer resposta RPC
+        if term_changed:
+            self._save_state()
 
         # Regra 3: Verifica consistência do log — o prev_log deve bater com o nosso
         # Se não bater, retorna False para o líder retroceder o nextIndex
@@ -92,6 +98,45 @@ class Replication:
             self._apply_commits()
 
         return raft_pb2.AppendEntriesReply(term=self.current_term, success=True)
+
+    # =========================================================================
+    # HANDLER gRPC: ReadData (leitura de dados committed)
+    # =========================================================================
+
+    def ReadData(self, request, context):
+        """
+        Handler gRPC chamado pelo cliente para ler dados committed do cluster.
+
+        Comportamento:
+          - Pode ser chamado em QUALQUER nó (líder ou réplica).
+          - Retorna APENAS entradas com índice <= commit_index (dados committed).
+          - Nunca expõe entradas uncommitted (acima do commit_index).
+          - Inclui leader_hint para que o cliente possa ir ao líder se quiser
+            garantia de leitura forte (linearizável).
+
+        Leitura em réplica oferece consistência eventual — o commit_index local
+        pode estar ligeiramente atrás do líder, mas NUNCA retorna dados não
+        confirmados pela maioria.
+        """
+        # Coleta todas as entradas committed (índice 1 até commit_index)
+        # Índice 0 é a entrada sentinela (command=None), por isso começa em 1
+        committed_entries = [
+            entry.command
+            for entry in self.log.entries[1:self.commit_index + 1]
+            if entry.command is not None
+        ]
+
+        # Informa o endereço do líder (se conhecido) para leitura forte
+        leader_addr = ''
+        if self.leader_id is not None:
+            leader_addr = config.NODES.get(self.leader_id, '')
+
+        return raft_pb2.ReadReply(
+            success=True,
+            entries=committed_entries,
+            commit_index=self.commit_index,
+            leader_hint=leader_addr,
+        )
 
     # =========================================================================
     # HANDLER gRPC: ReceiveCommand (interface com o cliente)
@@ -240,7 +285,14 @@ class Replication:
                 self._apply_commits()
 
     def _apply_commits(self):
-        """Aplica à state machine todas as entradas commitadas ainda não aplicadas."""
+        """
+        Aplica à state machine todas as entradas commitadas ainda não aplicadas.
+
+        Após aplicar, persiste o estado em disco (incluindo o log com as entradas
+        committed). Isso garante que, após um crash e reinício, o nó saiba quais
+        entradas já foram aplicadas e não as aplique em duplicata.
+        """
+        applied_any = False
         while self.last_applied < self.commit_index:
             self.last_applied += 1
             entry = self.log.get_entry(self.last_applied)
@@ -248,6 +300,12 @@ class Replication:
                 self._apply_to_state_machine(
                     f"[COMMIT] índice {entry.index} | termo {entry.term} | comando: '{entry.command}'"
                 )
+                applied_any = True
+
+        # Persiste o estado após aplicar commits (garante durabilidade pós-crash)
+        # Só salva se houve mudança, para evitar writes desnecessários
+        if applied_any:
+            self._save_state()
 
         # Notifica todos os threads bloqueados no ReceiveCommand aguardando este commit
         with self._commit_condition:

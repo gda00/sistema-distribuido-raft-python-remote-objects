@@ -45,15 +45,18 @@ class RaftNode(Replication, raft_pb2_grpc.RaftServiceServicer):
         # --- Log replicado ---
         self.log = RaftLog()
 
+        # --- Estado volátil inicializado ANTES da carga do disco ---
+        # (commit_index e last_applied são necessários em _load_persisted_state)
+        self.role = 'follower'    # papel atual: SEMPRE começa como follower
+        self.leader_id = None     # ID do líder conhecido (aprendido via heartbeats)
+        self.commit_index = 0    # será sobrescrito pelo valor do disco se existir
+        self.last_applied = 0    # será avançado pelo replay em _load_persisted_state
+
         # Tenta carregar estado salvo em disco (recuperação após crash)
         self._load_persisted_state()
 
-        # --- Estado volátil (sempre reinicia do zero, independente do crash) ---
-        self.role = 'follower'    # papel atual: SEMPRE começa como follower
-        self.leader_id = None     # ID do líder conhecido (aprendido via heartbeats)
+        # --- Demais estados voláteis (não dependem do disco) ---
 
-        self.commit_index = 0    # índice da entrada mais recente que sabemos estar commitada
-        self.last_applied = 0    # índice da entrada mais recente aplicada à state machine
 
         # --- Estado do líder (só válido quando role == 'leader') ---
         self.next_index = {}     # next_index[peer] = próximo índice a enviar ao peer
@@ -83,23 +86,29 @@ class RaftNode(Replication, raft_pb2_grpc.RaftServiceServicer):
 
     def _save_state(self):
         """
-        Persiste current_term, voted_for e o log em disco.
+        Persiste current_term, voted_for, o log E o commit_index em disco.
 
-        Deve ser chamado SEMPRE que current_term, voted_for ou o log mudarem,
-        ANTES de enviar a resposta RPC correspondente. Isso garante que, se o
-        processo morrer no meio de uma operação, o estado recuperado do disco
-        é consistente com o que o nó já prometeu aos outros.
+        Deve ser chamado SEMPRE que current_term, voted_for, o log ou o
+        commit_index mudarem, ANTES de enviar a resposta RPC correspondente.
+        Isso garante que, se o processo morrer no meio de uma operação, o
+        estado recuperado do disco é consistente com o que o nó já prometeu.
         """
         self._persistence.save(
             current_term=self.current_term,
             voted_for=self.voted_for,
             log_entries=self.log.entries,
+            commit_index=self.commit_index,   # persiste dados committed
         )
 
     def _load_persisted_state(self):
         """
         Carrega estado do disco ao iniciar.
         Se não há arquivo (primeira execução), mantém os valores padrão.
+
+        Além de restaurar term/voted_for/log, também restaura o commit_index
+        e re-aplica as entradas committed à state machine imediatamente —
+        sem precisar aguardar heartbeat do líder. Isso garante que o nó
+        recuperado pode servir leituras consistentes logo após o reinicialização.
         """
         state = self._persistence.load()
         if state is None:
@@ -110,10 +119,21 @@ class RaftNode(Replication, raft_pb2_grpc.RaftServiceServicer):
         self.voted_for    = state["voted_for"]    # pode ser None (null no JSON)
         self.log.entries  = self._persistence.restore_log(state["log"])
 
+        # Restaura commit_index (adicionado nesta versão; arquivos antigos não têm a chave)
+        self.commit_index = state.get("commit_index", 0)
+
+        # Re-aplica entradas committed à state machine sem aguardar heartbeat
+        # (last_applied começa em 0, então este loop replay todas as entradas já committed)
+        while self.last_applied < self.commit_index:
+            self.last_applied += 1
+            entry = self.log.get_entry(self.last_applied)
+            if entry and entry.command:
+                self.state_machine.append(entry.command)
+
         print(
             f"[NÓ {self.node_id}] Estado restaurado do disco: "
             f"term={self.current_term}, voted_for={self.voted_for}, "
-            f"log_size={self.log.get_last_index()}"
+            f"log_size={self.log.get_last_index()}, commit_index={self.commit_index}"
         )
 
     # =========================================================================
@@ -282,6 +302,10 @@ class RaftNode(Replication, raft_pb2_grpc.RaftServiceServicer):
             self.current_term = term
             self.role = 'follower'
             self.voted_for = None
+            # Persiste o novo termo imediatamente (§5.1): mesmo que não concedamos
+            # o voto, o termo atualizado precisa ser durável antes de responder.
+            # Sem isso, se o nó cair aqui, poderia votar duas vezes no mesmo termo real.
+            self._save_state()
 
         # Regra 3: Concede voto se (ainda não votamos OU já votamos neste candidato)
         #          E o log do candidato está atualizado

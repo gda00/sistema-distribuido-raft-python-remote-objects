@@ -7,9 +7,14 @@ responder qualquer RPC (para sobreviver a falhas/reinicializações):
   2. voted_for    — evita conceder dois votos no mesmo termo
   3. log[]        — não perder entradas já aceitas
 
+Além das três variáveis do paper, este projeto também persiste:
+  4. commit_index — permite que o nó saiba, após recuperação, quais
+                    entradas já foram efetivadas (committed), sem precisar
+                    aguardar heartbeat do líder. Atende ao requisito do
+                    enunciado: "Dados finais (committed)" devem ser persistidos.
+
 Variáveis VOLÁTEIS (não precisam de persistência):
   - role         → sempre reinicia como 'follower'
-  - commit_index → é recuperado via heartbeats do líder
   - next_index, match_index → só o líder usa, reinicializa ao se tornar líder
 
 Estratégia de escrita: "write-then-rename" (atômica no SO)
@@ -36,7 +41,7 @@ class Persistence:
     # SALVAR
     # ------------------------------------------------------------------
 
-    def save(self, current_term: int, voted_for, log_entries: list):
+    def save(self, current_term: int, voted_for, log_entries: list, commit_index: int = 0):
         """
         Persiste o estado crítico do nó em disco.
 
@@ -47,10 +52,12 @@ class Persistence:
             current_term : int  — termo atual do nó
             voted_for    : int | None — ID do candidato votado neste termo
             log_entries  : list[LogEntry] — todas as entradas do log (incluindo sentinela)
+            commit_index : int  — índice da última entrada committed (padrão 0)
         """
         state = {
             "current_term": current_term,
             "voted_for": voted_for,                   # None é serializado como null em JSON
+            "commit_index": commit_index,              # persiste dados efetivados (committed)
             "log": [
                 {
                     "index":   e.index,
@@ -74,7 +81,8 @@ class Persistence:
         """
         Carrega o estado persistido do disco.
 
-        Retorna um dicionário com as chaves 'current_term', 'voted_for' e 'log',
+        Retorna um dicionário com as chaves:
+          'current_term', 'voted_for', 'commit_index' e 'log',
         ou None se não houver arquivo de estado (primeira inicialização).
         """
         if not os.path.exists(self.path):

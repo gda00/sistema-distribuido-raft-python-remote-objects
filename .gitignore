@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Scenarios
+run_scenarios.py 
+/run_scenarios.py 
