@@ -1,22 +1,3 @@
-/*
-main.go — Cliente Raft externo em Go
-
-Cliente interativo que se conecta ao cluster Raft via gRPC e permite:
-  - publish <dado>  : envia um comando ao cluster (write, via ReceiveCommand)
-  - consume         : lê todos os dados committed do nó atual (via ReadData)
-  - consume --leader: garante leitura do líder (leitura forte)
-  - help            : exibe ajuda
-  - quit / exit     : encerra o cliente
-
-Estratégia de descoberta do líder:
-  1. Tenta o último líder conhecido.
-  2. Se falhar ou receber leader_hint, redireciona automaticamente.
-  3. Se tudo falhar, varre todos os nós em round-robin.
-  4. Retry automático com backoff em caso de eleição em andamento.
-
-Restrição do enunciado: o cliente SÓ usa ReceiveCommand e ReadData.
-Nunca chama RequestVote ou AppendEntries (operações internas do Raft).
-*/
 package main
 
 import (
@@ -32,7 +13,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// Endereços dos nós do cluster Raft (deve bater com config.py do servidor Python)
 var clusterNodes = []string{
 	"localhost:50050",
 	"localhost:50051",
@@ -40,13 +20,10 @@ var clusterNodes = []string{
 	"localhost:50053",
 }
 
-// RaftClient mantém o estado do cliente: endereço do líder e conexão atual.
 type RaftClient struct {
-	leaderAddr string // endereço gRPC do líder conhecido (pode ser vazio)
+	leaderAddr string
 }
 
-// newStub abre uma conexão gRPC para o endereço dado e retorna o stub.
-// O caller é responsável por fechar a conexão com defer conn.Close().
 func newStub(addr string) (*grpc.ClientConn, pb.RaftServiceClient, error) {
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -55,22 +32,17 @@ func newStub(addr string) (*grpc.ClientConn, pb.RaftServiceClient, error) {
 	return conn, pb.NewRaftServiceClient(conn), nil
 }
 
-// publish envia um comando (write) ao cluster.
-// Descobre o líder automaticamente via leader_hint ou varrendo todos os nós.
-// Faz até maxRetries tentativas em caso de eleição em andamento.
 func (c *RaftClient) publish(command string) bool {
 	const maxRetries = 5
 	const retryDelay = 2 * time.Second
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// 1. Tenta o líder conhecido primeiro
 		if c.leaderAddr != "" {
 			ok, hint := c.tryPublish(c.leaderAddr, command)
 			if ok {
 				return true
 			}
 			if hint != "" && hint != c.leaderAddr {
-				// Redirecionamento direto ao líder indicado
 				c.leaderAddr = hint
 				ok2, _ := c.tryPublish(c.leaderAddr, command)
 				if ok2 {
@@ -78,10 +50,9 @@ func (c *RaftClient) publish(command string) bool {
 					return true
 				}
 			}
-			c.leaderAddr = "" // líder anterior inválido
+			c.leaderAddr = ""
 		}
 
-		// 2. Varre todos os nós em busca do líder
 		for _, addr := range clusterNodes {
 			ok, hint := c.tryPublish(addr, command)
 			if ok {
@@ -90,7 +61,6 @@ func (c *RaftClient) publish(command string) bool {
 				return true
 			}
 			if hint != "" {
-				// Vai direto ao líder sugerido
 				ok2, _ := c.tryPublish(hint, command)
 				if ok2 {
 					c.leaderAddr = hint
@@ -100,7 +70,6 @@ func (c *RaftClient) publish(command string) bool {
 			}
 		}
 
-		// 3. Nenhum nó aceitou — provavelmente há eleição em andamento
 		if attempt < maxRetries {
 			fmt.Printf("[CLIENTE] Aguardando líder... (tentativa %d/%d)\n", attempt, maxRetries)
 			time.Sleep(retryDelay)
@@ -111,8 +80,6 @@ func (c *RaftClient) publish(command string) bool {
 	return false
 }
 
-// tryPublish tenta enviar um comando a um nó específico.
-// Retorna (sucesso, leader_hint).
 func (c *RaftClient) tryPublish(addr, command string) (bool, string) {
 	conn, stub, err := newStub(addr)
 	if err != nil {
@@ -133,9 +100,6 @@ func (c *RaftClient) tryPublish(addr, command string) (bool, string) {
 	return false, reply.LeaderHint
 }
 
-// consume lê todos os dados committed de um nó do cluster.
-// Se requireLeader=true, garante que a leitura vem do líder (leitura forte).
-// Se requireLeader=false, pode ler de qualquer réplica (consistência eventual).
 func (c *RaftClient) consume(requireLeader bool) {
 	addr := c.chooseReadNode(requireLeader)
 	if addr == "" {
@@ -176,22 +140,16 @@ func (c *RaftClient) consume(requireLeader bool) {
 	}
 	fmt.Println("─────────────────────────────────────────")
 
-	// Atualiza o líder conhecido se o nó informar
 	if reply.LeaderHint != "" {
 		c.leaderAddr = reply.LeaderHint
 	}
 }
 
-// chooseReadNode seleciona o nó para leitura.
-// Se requireLeader=true, vai ao líder (ou descobre qual é).
-// Se requireLeader=false, usa round-robin nos nós disponíveis.
 func (c *RaftClient) chooseReadNode(requireLeader bool) string {
 	if requireLeader {
-		// Tenta o líder conhecido; se não souber, faz uma query rápida
 		if c.leaderAddr != "" {
 			return c.leaderAddr
 		}
-		// Descobre o líder fazendo uma leitura em qualquer nó e usando o hint
 		for _, addr := range clusterNodes {
 			conn, stub, err := newStub(addr)
 			if err != nil {
@@ -206,10 +164,9 @@ func (c *RaftClient) chooseReadNode(requireLeader bool) string {
 				return c.leaderAddr
 			}
 		}
-		return "" // não foi possível descobrir o líder
+		return ""
 	}
 
-	// Leitura eventual: qualquer nó disponível
 	for _, addr := range clusterNodes {
 		conn, stub, err := newStub(addr)
 		if err != nil {
@@ -250,7 +207,7 @@ func main() {
 	for {
 		fmt.Print("> ")
 		if !scanner.Scan() {
-			break // EOF ou Ctrl+C
+			break
 		}
 
 		line := strings.TrimSpace(scanner.Text())
